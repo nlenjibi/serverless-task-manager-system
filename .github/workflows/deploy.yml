@@ -11,8 +11,13 @@ env:
   AWS_REGION: us-east-1
   SAM_CLI_TELEMETRY: 0
 
+# Required for OIDC token issuance
+permissions:
+  id-token: write   # request the JWT from GitHub's OIDC provider
+  contents: read    # checkout the repo
+
 jobs:
-  # ─── Lint & Validate ────────────────────────────────────────────────────────
+  # ─── Lint & Validate ──────────────────────────────────────────────────────────
   validate:
     name: Lint and Validate
     runs-on: ubuntu-latest
@@ -33,17 +38,16 @@ jobs:
         with:
           use-installer: true
 
-      - name: Configure AWS credentials (validate only)
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Validate SAM template
         run: sam validate --lint
 
-  # ─── Build & Deploy ─────────────────────────────────────────────────────────
+  # ─── Build & Deploy ───────────────────────────────────────────────────────────
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
@@ -61,11 +65,10 @@ jobs:
         with:
           use-installer: true
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Cache SAM build artifacts
