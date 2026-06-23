@@ -1,0 +1,457 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless To-Do Application with Event-Driven Task Expiry
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Layers:
+      - !Sub "arn:aws:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:7"
+    Environment:
+      Variables:
+        TASKS_TABLE: !Ref TasksTable
+        SNS_TOPIC_ARN: !Ref TaskNotificationsTopic
+        CANCELLATION_QUEUE_URL: !Ref CancellationQueue
+        POWERTOOLS_SERVICE_NAME: todo-app
+        LOG_LEVEL: INFO
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COGNITO
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-UserPool"
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      LambdaConfig:
+        PreSignUp: !GetAtt PreSignUpFunction.Arn
+        PostAuthentication: !GetAtt PostAuthFunction.Arn
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: false
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${AWS::StackName}-WebClient"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      PreventUserExistenceErrors: ENABLED
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DYNAMODB
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  TasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-Tasks"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: UserId
+          AttributeType: S
+        - AttributeName: TaskId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: UserId
+          KeyType: HASH
+        - AttributeName: TaskId
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SNS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  TaskNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-TaskNotifications"
+      DisplayName: "Todo App — Task Notifications"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SQS FIFO
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  CancellationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-Cancellation.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 3600
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EVENTBRIDGE SCHEDULER ROLE
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-SchedulerRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeExpiryLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt TaskExpiryFunction.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # API GATEWAY
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  TodoApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-API"
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+        MaxAge: "'600'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+            Identity:
+              Header: Authorization
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — PRE-SIGNUP (auto-confirm users)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  PreSignUpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-PreSignUp"
+      CodeUri: lambdas/pre_signup/
+      Handler: handler.lambda_handler
+      Description: Auto-confirms new Cognito user sign-ups
+
+  PreSignUpCognitoPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PreSignUpFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — POST-AUTHENTICATION (subscribe user email to SNS)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  PostAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-PostAuth"
+      CodeUri: lambdas/post_auth/
+      Handler: handler.lambda_handler
+      Description: Subscribes user email to SNS topic after first sign-in
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sns:Subscribe
+                - sns:ListSubscriptionsByTopic
+              Resource: !Ref TaskNotificationsTopic
+
+  PostAuthCognitoPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PostAuthFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — CREATE TASK
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  CreateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-CreateTask"
+      CodeUri: lambdas/create_task/
+      Handler: handler.lambda_handler
+      Description: Creates a task in DynamoDB and schedules an expiry event
+      Environment:
+        Variables:
+          SCHEDULER_ROLE_ARN: !GetAtt SchedulerRole.Arn
+          EXPIRY_FUNCTION_ARN: !GetAtt TaskExpiryFunction.Arn
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref TasksTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - scheduler:CreateSchedule
+                - scheduler:DeleteSchedule
+              Resource: !Sub "arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*"
+            - Effect: Allow
+              Action: iam:PassRole
+              Resource: !GetAtt SchedulerRole.Arn
+      Events:
+        CreateTask:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks
+            Method: POST
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — GET TASKS
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  GetTasksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-GetTasks"
+      CodeUri: lambdas/get_tasks/
+      Handler: handler.lambda_handler
+      Description: Returns all tasks for the authenticated user
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TasksTable
+      Events:
+        GetTasks:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks
+            Method: GET
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — UPDATE TASK
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  UpdateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-UpdateTask"
+      CodeUri: lambdas/update_task/
+      Handler: handler.lambda_handler
+      Description: Updates task description, date, or status
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TasksTable
+      Events:
+        UpdateTask:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks/{taskId}
+            Method: PUT
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — DELETE TASK
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  DeleteTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-DeleteTask"
+      CodeUri: lambdas/delete_task/
+      Handler: handler.lambda_handler
+      Description: Deletes a task owned by the authenticated user
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TasksTable
+      Events:
+        DeleteTask:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TodoApi
+            Path: /tasks/{taskId}
+            Method: DELETE
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — TASK EXPIRY HANDLER (triggered by EventBridge Scheduler)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  TaskExpiryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-TaskExpiry"
+      CodeUri: lambdas/task_expiry/
+      Handler: handler.lambda_handler
+      Description: Marks task as Expired and sends SNS email notification
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TasksTable
+        - Statement:
+            - Effect: Allow
+              Action: sns:Publish
+              Resource: !Ref TaskNotificationsTopic
+
+  TaskExpirySchedulerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt TaskExpiryFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !Sub "arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — STREAM PROCESSOR (DynamoDB Streams → SQS FIFO)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  StreamProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-StreamProcessor"
+      CodeUri: lambdas/stream_processor/
+      Handler: handler.lambda_handler
+      Description: Reads DynamoDB Streams and routes cancellation events to SQS FIFO
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt CancellationQueue.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeStream
+                - dynamodb:ListStreams
+              Resource: !GetAtt TasksTable.StreamArn
+      Events:
+        DynamoDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt TasksTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 10
+            BisectBatchOnFunctionError: true
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["MODIFY", "REMOVE"]}'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LAMBDA — CANCELLATION HANDLER (SQS FIFO → delete EventBridge schedule)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  CancellationHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-CancellationHandler"
+      CodeUri: lambdas/cancellation_handler/
+      Handler: handler.lambda_handler
+      Description: Cancels the EventBridge Scheduler schedule for completed/deleted tasks
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+              Resource: !GetAtt CancellationQueue.Arn
+            - Effect: Allow
+              Action:
+                - scheduler:DeleteSchedule
+                - scheduler:GetSchedule
+              Resource: !Sub "arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*"
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CancellationQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OUTPUTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolId"
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClientId"
+
+  TasksTableName:
+    Description: DynamoDB Tasks table name
+    Value: !Ref TasksTable
+    Export:
+      Name: !Sub "${AWS::StackName}-TasksTable"
+
+  SnsTopicArn:
+    Description: SNS Topic ARN for task notifications
+    Value: !Ref TaskNotificationsTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-SnsTopicArn"
+
+  CancellationQueueUrl:
+    Description: SQS FIFO Cancellation Queue URL
+    Value: !Ref CancellationQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-CancellationQueueUrl"

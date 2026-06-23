@@ -1,0 +1,18 @@
+# SAM build artifacts
+.aws-sam/
+samconfig.toml.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
