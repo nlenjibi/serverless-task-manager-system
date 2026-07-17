@@ -115,8 +115,7 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
                 token.actions.githubusercontent.com:repository: !Sub "${GitHubOrg}/${GitHubRepo}"
               StringLike:
-               
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}@*/${GitHubRepo}@*:*"
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:*"
       Policies:
         - PolicyName: cloudformation-deploy
           PolicyDocument:
