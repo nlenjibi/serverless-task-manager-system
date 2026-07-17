@@ -1,16 +1,3 @@
 template-file-path: foundation/foundation.yaml
-stack-name: bem17-foundation
-region: eu-west-1
-capabilities:
-  - CAPABILITY_IAM
-  - CAPABILITY_NAMED_IAM
-parameters:
-  ProjectName: bem17
-  GitHubOrg: nlenjibi
-  GitHubRepo: serverless-task-manager-system
-  AppStackName: serverless-todo-app
-  DevArtifactsBucketName: bem-sam-dev-artifacts
-  ProdArtifactsBucketName: bem-sam-prod-artifacts
-tags:
-  Project: bem17
-  ManagedBy: CloudFormation-GitSync
+parameters: {}
+tags: {}
