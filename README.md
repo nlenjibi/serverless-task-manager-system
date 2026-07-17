@@ -85,4 +85,4 @@ GitHub Actions pipeline (`.github/workflows/deploy.yml`) runs on every push to `
 | `DeleteTask` | DELETE /tasks/{id} | Deletes task |
 | `TaskExpiry` | EventBridge Scheduler | Marks task Expired + sends SNS |
 | `StreamProcessor` | DynamoDB Streams | Routes cancellation events to SQS FIFO |
-| `CancellationHandler` | SQS FIFO | Deletes EventBridge schedule |
+| `CancellationHandler` | SQS FIFO | Deletes EventBridge schedule ||
