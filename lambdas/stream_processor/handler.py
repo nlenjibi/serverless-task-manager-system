@@ -38,12 +38,9 @@ def lambda_handler(event, context):
         old_status = _extract_str(old_image, "Status")
         new_status = _extract_str(new_image, "Status")
 
-        should_cancel = (
-            # Completed before deadline
-            (event_name == "MODIFY" and old_status == "Pending" and new_status == "Completed")
-            # Deleted while still Pending
-            or (event_name == "REMOVE" and old_status == "Pending")
-        )
+        completed_before_deadline = event_name == "MODIFY" and old_status == "Pending" and new_status == "Completed"
+        deleted_while_pending = event_name == "REMOVE" and old_status == "Pending"
+        should_cancel = completed_before_deadline or deleted_while_pending
 
         if not should_cancel:
             continue
