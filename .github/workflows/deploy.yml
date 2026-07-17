@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: eu-west-1
   SAM_CLI_TELEMETRY: 0
 
 # Required for OIDC token issuance
@@ -85,7 +85,7 @@ jobs:
           sam deploy \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --resolve-s3 \
+            --s3-bucket bem-sam-dev-artifacts \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
 
       - name: Print stack outputs

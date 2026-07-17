@@ -18,12 +18,20 @@ Globals:
         CANCELLATION_QUEUE_URL: !Ref CancellationQueue
         POWERTOOLS_SERVICE_NAME: todo-app
         LOG_LEVEL: INFO
+    Tags:
+      Project: !Ref ProjectName
+      Stage: !Ref Stage
+      ManagedBy: SAM-GitHubActions
 
 Parameters:
   Stage:
     Type: String
     Default: dev
     AllowedValues: [dev, staging, prod]
+  ProjectName:
+    Type: String
+    Default: bem17
+    Description: Used to tag all resources for cost allocation and ownership tracking
 
 Resources:
 
@@ -58,6 +66,10 @@ Resources:
         RecoveryMechanisms:
           - Name: verified_email
             Priority: 1
+      UserPoolTags:
+        Project: !Ref ProjectName
+        Stage: !Ref Stage
+        ManagedBy: SAM-GitHubActions
 
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
@@ -101,6 +113,13 @@ Resources:
         StreamViewType: NEW_AND_OLD_IMAGES
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: SAM-GitHubActions
 
   # ─────────────────────────────────────────────────────────────────────────────
   # SNS
@@ -111,6 +130,13 @@ Resources:
     Properties:
       TopicName: !Sub "${AWS::StackName}-TaskNotifications"
       DisplayName: "Todo App — Task Notifications"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: SAM-GitHubActions
 
   # ─────────────────────────────────────────────────────────────────────────────
   # SQS FIFO
@@ -124,6 +150,13 @@ Resources:
       ContentBasedDeduplication: true
       VisibilityTimeout: 60
       MessageRetentionPeriod: 3600
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: SAM-GitHubActions
 
   # ─────────────────────────────────────────────────────────────────────────────
   # EVENTBRIDGE SCHEDULER ROLE
@@ -148,6 +181,13 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !GetAtt TaskExpiryFunction.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: SAM-GitHubActions
 
   # ─────────────────────────────────────────────────────────────────────────────
   # API GATEWAY
@@ -171,6 +211,10 @@ Resources:
             UserPoolArn: !GetAtt UserPool.Arn
             Identity:
               Header: Authorization
+      Tags:
+        Project: !Ref ProjectName
+        Stage: !Ref Stage
+        ManagedBy: SAM-GitHubActions
 
   # ─────────────────────────────────────────────────────────────────────────────
   # LAMBDA — PRE-SIGNUP (auto-confirm users)

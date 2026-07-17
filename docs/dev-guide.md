@@ -283,7 +283,7 @@ sam deploy --guided
 
 You will be prompted for:
 - Stack name — press Enter to accept `serverless-todo-app`
-- Region — `us-east-1` (or your preferred region)
+- Region — `eu-west-1` (or your preferred region)
 - Confirm IAM role creation — `y`
 - Allow SAM to create S3 bucket — `y`
 

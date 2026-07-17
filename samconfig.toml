@@ -14,9 +14,9 @@ lint = true
 [default.deploy.parameters]
 capabilities       = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
 confirm_changeset  = false
-resolve_s3         = true
+s3_bucket          = "bem-sam-dev-artifacts"
 s3_prefix          = "serverless-todo-app"
-region             = "us-east-1"
+region             = "eu-west-1"
 parameter_overrides = "Stage=dev"
 
 [default.sync.parameters]
