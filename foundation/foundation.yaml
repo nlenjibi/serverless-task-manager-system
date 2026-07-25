@@ -113,9 +113,8 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:repository: !Sub "${GitHubOrg}/${GitHubRepo}"
-              StringLike:
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:*"
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+              
       Policies:
         - PolicyName: cloudformation-deploy
           PolicyDocument:
@@ -204,6 +203,9 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:apigateway:${AWS::Region}::/restapis"
                   - !Sub "arn:aws:apigateway:${AWS::Region}::/restapis/*"
+                  # API Gateway tagging (e.g. tagging TodoApiStage) is checked against a
+                  # /tags/{url-encoded-resource-arn} path, not the /restapis/* resource itself
+                  - !Sub "arn:aws:apigateway:${AWS::Region}::/tags/*"
         - PolicyName: sns-topic-lifecycle
           PolicyDocument:
             Version: '2012-10-17'
@@ -267,14 +269,15 @@ Resources:
                   - !Sub "arn:aws:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:*"
               - Sid: LambdaEventSourceMappings
                 Effect: Allow
+                # These Lambda APIs do not support resource-level permissions per AWS's
+                # IAM action reference — they must be called with Resource: "*".
                 Action:
                   - lambda:CreateEventSourceMapping
                   - lambda:DeleteEventSourceMapping
                   - lambda:UpdateEventSourceMapping
                   - lambda:GetEventSourceMapping
                   - lambda:ListEventSourceMappings
-                Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:event-source-mapping:*"
+                Resource: "*"
         - PolicyName: iam-role-management
           PolicyDocument:
             Version: '2012-10-17'
