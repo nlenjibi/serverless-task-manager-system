@@ -8,7 +8,7 @@
 
 ```mermaid
 graph TD
-    subgraph Client["🌐 Client — AWS Amplify (Next.js)"]
+    subgraph Client["🌐 Client — AWS Amplify Hosting (frontend/, Next.js, monorepo build)"]
         UI["Task Dashboard"]
     end
 
@@ -39,6 +39,7 @@ graph TD
     subgraph Events["📅 Event Bus"]
         SCHED["EventBridge Scheduler\n(per-task one-time rule)"]
         SQS["SQS FIFO\nCancellation Queue"]
+        DLQ["SQS FIFO\nCancellation DLQ"]
     end
 
     subgraph Notify["📧 Notifications"]
@@ -75,6 +76,7 @@ graph TD
     DDB -- "Stream (MODIFY / REMOVE)" --> STREAM
     STREAM -- "SendMessage (FIFO)" --> SQS
     SQS -- "Trigger" --> CANCEL
+    SQS -. "after 5 failed receives" .-> DLQ
     CANCEL -- "DeleteSchedule" --> SCHED
 
     Compute --> CW

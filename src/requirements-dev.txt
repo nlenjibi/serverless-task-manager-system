@@ -1,0 +1,5 @@
+# Local editing/linting only — the deployed Lambda layer
+# (AWSLambdaPowertoolsPythonV3-python312-x86_64, see template.yaml Globals)
+# already provides aws-lambda-powertools and boto3 at runtime.
+aws-lambda-powertools>=3.0.0
+boto3>=1.34.130

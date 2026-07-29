@@ -7,6 +7,7 @@ Globals:
     Runtime: python3.12
     Timeout: 30
     MemorySize: 256
+    Tracing: Active
     Architectures:
       - x86_64
     Layers:
@@ -32,6 +33,26 @@ Parameters:
     Type: String
     Default: bem17
     Description: Used to tag all resources for cost allocation and ownership tracking
+  FrontendRepoUrl:
+    Type: String
+    Default: ""
+    Description: >
+      HTTPS URL of THIS repo (serverless-task-manager-system) — the frontend lives in its
+      frontend/ subfolder and Amplify builds it as a monorepo app root. Leave blank to skip
+      provisioning Amplify Hosting from this template (e.g. if you prefer to connect the repo
+      manually in the Amplify console).
+  FrontendRepoBranch:
+    Type: String
+    Default: main
+  GitHubAccessToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: GitHub personal access token with repo scope, used by Amplify to pull this repo
+
+Conditions:
+  DeployAmplify: !Not [!Equals [!Ref FrontendRepoUrl, ""]]
+  IsProd: !Equals [!Ref Stage, prod]
 
 Resources:
 
@@ -142,6 +163,20 @@ Resources:
   # SQS FIFO
   # ─────────────────────────────────────────────────────────────────────────────
 
+  CancellationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-Cancellation-DLQ.fifo"
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: SAM-GitHubActions
+
   CancellationQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -150,6 +185,9 @@ Resources:
       ContentBasedDeduplication: true
       VisibilityTimeout: 60
       MessageRetentionPeriod: 3600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CancellationDLQ.Arn
+        maxReceiveCount: 5
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -193,6 +231,12 @@ Resources:
   # API GATEWAY
   # ─────────────────────────────────────────────────────────────────────────────
 
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}-access"
+      RetentionInDays: 14
+
   TodoApi:
     Type: AWS::Serverless::Api
     Properties:
@@ -211,6 +255,18 @@ Resources:
             UserPoolArn: !GetAtt UserPool.Arn
             Identity:
               Header: Authorization
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          MetricsEnabled: true
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp","caller":"$context.identity.caller",
+          "user":"$context.identity.user","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "resourcePath":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol",
+          "responseLength":"$context.responseLength"}
       Tags:
         Project: !Ref ProjectName
         Stage: !Ref Stage
@@ -224,8 +280,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-PreSignUp"
-      CodeUri: lambdas/pre_signup/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: pre_signup.handler.lambda_handler
       Description: Auto-confirms new Cognito user sign-ups
 
   PreSignUpCognitoPermission:
@@ -244,8 +300,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-PostAuth"
-      CodeUri: lambdas/post_auth/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: post_auth.handler.lambda_handler
       Description: Subscribes user email to SNS topic after first sign-in
       Policies:
         - Statement:
@@ -271,8 +327,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-CreateTask"
-      CodeUri: lambdas/create_task/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: create_task.handler.lambda_handler
       Description: Creates a task in DynamoDB and schedules an expiry event
       Environment:
         Variables:
@@ -306,8 +362,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-GetTasks"
-      CodeUri: lambdas/get_tasks/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: get_tasks.handler.lambda_handler
       Description: Returns all tasks for the authenticated user
       Policies:
         - DynamoDBReadPolicy:
@@ -328,12 +384,14 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-UpdateTask"
-      CodeUri: lambdas/update_task/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: update_task.handler.lambda_handler
       Description: Updates task description, date, or status
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TasksTable
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt TasksTable.Arn
       Events:
         UpdateTask:
           Type: Api
@@ -350,12 +408,14 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-DeleteTask"
-      CodeUri: lambdas/delete_task/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: delete_task.handler.lambda_handler
       Description: Deletes a task owned by the authenticated user
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TasksTable
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:DeleteItem
+              Resource: !GetAtt TasksTable.Arn
       Events:
         DeleteTask:
           Type: Api
@@ -372,8 +432,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-TaskExpiry"
-      CodeUri: lambdas/task_expiry/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: task_expiry.handler.lambda_handler
       Description: Marks task as Expired and sends SNS email notification
       Policies:
         - DynamoDBCrudPolicy:
@@ -399,8 +459,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-StreamProcessor"
-      CodeUri: lambdas/stream_processor/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: stream_processor.handler.lambda_handler
       Description: Reads DynamoDB Streams and routes cancellation events to SQS FIFO
       Policies:
         - Statement:
@@ -434,8 +494,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-CancellationHandler"
-      CodeUri: lambdas/cancellation_handler/
-      Handler: handler.lambda_handler
+      CodeUri: src/
+      Handler: cancellation_handler.handler.lambda_handler
       Description: Cancels the EventBridge Scheduler schedule for completed/deleted tasks
       Policies:
         - Statement:
@@ -458,6 +518,66 @@ Resources:
             BatchSize: 1
             FunctionResponseTypes:
               - ReportBatchItemFailures
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # AMPLIFY — FRONTEND HOSTING (only provisioned if FrontendRepoUrl is set)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  AmplifyApp:
+    Type: AWS::Amplify::App
+    Condition: DeployAmplify
+    Properties:
+      Name: !Sub "${AWS::StackName}-frontend"
+      Repository: !Ref FrontendRepoUrl
+      AccessToken: !Ref GitHubAccessToken
+      EnvironmentVariables:
+        - Name: NEXT_PUBLIC_USER_POOL_ID
+          Value: !Ref UserPool
+        - Name: NEXT_PUBLIC_USER_POOL_CLIENT_ID
+          Value: !Ref UserPoolClient
+        - Name: NEXT_PUBLIC_API_URL
+          Value: !Sub "https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+        - Name: NEXT_PUBLIC_AWS_REGION
+          Value: !Ref AWS::Region
+      # Monorepo build spec: the Next.js app lives in frontend/, not the repo root,
+      # so Amplify needs an explicit `applications` app-root entry rather than
+      # auto-detecting a root-level amplify.yml.
+      BuildSpec: |
+        version: 1
+        applications:
+          - appRoot: frontend
+            frontend:
+              phases:
+                preBuild:
+                  commands:
+                    - npm ci
+                build:
+                  commands:
+                    - npm run build
+              artifacts:
+                baseDirectory: .next
+                files:
+                  - '**/*'
+              cache:
+                paths:
+                  - node_modules/**/*
+                  - .next/cache/**/*
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: SAM-GitHubActions
+
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Condition: DeployAmplify
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: !Ref FrontendRepoBranch
+      EnableAutoBuild: true
+      Stage: !If [IsProd, PRODUCTION, DEVELOPMENT]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OUTPUTS
@@ -499,3 +619,8 @@ Outputs:
     Value: !Ref CancellationQueue
     Export:
       Name: !Sub "${AWS::StackName}-CancellationQueueUrl"
+
+  AmplifyDefaultDomain:
+    Description: Amplify Hosting URL for the frontend (only set when FrontendRepoUrl was provided)
+    Condition: DeployAmplify
+    Value: !Sub "https://${FrontendRepoBranch}.${AmplifyApp.DefaultDomain}"

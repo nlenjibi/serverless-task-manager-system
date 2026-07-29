@@ -36,30 +36,53 @@ aws configure
 
 ## Project Structure
 
+This is a monorepo: backend (SAM) at the root, frontend (Next.js 14 +
+TypeScript, hosted on Amplify) in `frontend/`.
+
 ```
 serverless-task-manager-system/
 │
 ├── template.yaml                  # SAM / CloudFormation — all infrastructure
 ├── samconfig.toml                 # SAM deploy defaults (region, stack name, etc.)
 │
-├── lambdas/
-│   ├── pre_signup/                # Cognito PreSignUp trigger
+├── frontend/                      # Next.js app — Amplify monorepo app root (see template.yaml)
+│   ├── amplify.yml                #   Build spec used if connected manually via Amplify console
+│   ├── src/{app,features,components,lib,store,types}/
+│   └── test/                      #   Jest unit tests
+│
+├── src/                           # Every function's CodeUri is this shared root —
+│   │                              # required so each handler can import lib/.
+│   ├── lib/                       # Shared code, imported by every handler below
+│   │   ├── ddb.py                 #   DynamoDB table handle
+│   │   ├── http.py                #   Response envelope, CORS, Cognito claim extraction
+│   │   └── observability.py       #   Powertools Logger/Tracer instances
+│   ├── requirements-dev.txt       # Local-only deps (Powertools/boto3) for editing/linting
+│   ├── pre_signup/                # Cognito PreSignUp trigger — Handler: pre_signup.handler.lambda_handler
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   ├── post_auth/                 # Cognito PostAuthentication trigger
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   ├── create_task/               # POST /tasks
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   ├── get_tasks/                 # GET /tasks
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   ├── update_task/               # PUT /tasks/{taskId}
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   ├── delete_task/               # DELETE /tasks/{taskId}
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   ├── task_expiry/               # EventBridge Scheduler → mark Expired + SNS
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   ├── stream_processor/          # DynamoDB Streams → SQS FIFO
+│   │   ├── __init__.py
 │   │   └── handler.py
 │   └── cancellation_handler/      # SQS FIFO → delete EventBridge schedule
+│       ├── __init__.py
 │       └── handler.py
 │
 ├── docs/
@@ -68,8 +91,15 @@ serverless-task-manager-system/
 │
 └── .github/
     └── workflows/
-        └── deploy.yml             # GitHub Actions CI/CD (OIDC auth)
+        └── deploy.yml             # GitHub Actions CI (lint + validate only — see note below)
 ```
+
+> Every function's `CodeUri` is the shared `src/` root, and `Handler` uses a
+> dotted path into the subpackage (e.g. `create_task.handler.lambda_handler`)
+> instead of the shorter `handler.lambda_handler`. This is deliberate: if each
+> function's `CodeUri` pointed at its own subfolder instead, the sibling
+> `src/lib/` module wouldn't be included in that function's deployment
+> package and every `from lib... import ...` would fail at runtime.
 
 ---
 
@@ -164,9 +194,10 @@ sns.subscribe(
 ### CreateTaskFunction
 
 **Trigger:** `POST /tasks` via API Gateway  
-**Purpose:** Creates a DynamoDB item with `Status = Pending` and schedules a one-time **EventBridge Scheduler** event at `now + 5 minutes`.
+**Purpose:** Creates a DynamoDB item with `Status = Pending` and schedules a one-time **EventBridge Scheduler** event at the deadline.
 
 Key design decisions:
+- `deadline` in the request body is optional — an ISO-8601 timestamp in the future overrides the default; anything missing, unparsable, or in the past falls back to `now + 5 minutes`.
 - The schedule name is `task-expiry-{TaskId}` — deterministic, used for cancellation later.
 - `ActionAfterCompletion: DELETE` cleans up the schedule after it fires.
 - The Cognito `sub` claim is used as `UserId` — never trust client-supplied user IDs.
@@ -189,7 +220,7 @@ Key design decisions:
 **Trigger:** `PUT /tasks/{taskId}` via API Gateway  
 **Purpose:** Updates `Description`, `Date`, or `Status` (only `Pending → Completed` is allowed through this endpoint). Uses a `ConditionExpression` to prevent updating another user's task.
 
-**IAM permissions:** `dynamodb:UpdateItem`
+**IAM permissions:** `dynamodb:UpdateItem` only (hand-written statement, not the broader `DynamoDBCrudPolicy`)
 
 ---
 
@@ -198,7 +229,7 @@ Key design decisions:
 **Trigger:** `DELETE /tasks/{taskId}` via API Gateway  
 **Purpose:** Deletes a task. A `ConditionExpression` enforces ownership. DynamoDB Streams picks up the deletion and triggers the cancellation workflow.
 
-**IAM permissions:** `dynamodb:DeleteItem`
+**IAM permissions:** `dynamodb:DeleteItem` only (hand-written statement, not the broader `DynamoDBCrudPolicy`)
 
 ---
 
@@ -312,6 +343,18 @@ aws cloudformation describe-stacks \
 | `ApiUrl` | `NEXT_PUBLIC_API_URL` in frontend |
 | `UserPoolId` | `NEXT_PUBLIC_USER_POOL_ID` in frontend |
 | `UserPoolClientId` | `NEXT_PUBLIC_USER_POOL_CLIENT_ID` in frontend |
+| `AmplifyDefaultDomain` | Hosted frontend URL (only present if `FrontendRepoUrl` was set) |
+
+## Frontend
+
+The frontend is `frontend/` in this same repo (Next.js 14 + TypeScript,
+`aws-amplify` for Cognito auth, Axios for API calls), built by Amplify as a
+monorepo app (`appRoot: frontend` in the `AmplifyApp` resource's `BuildSpec`
+— see `template.yaml` and the root `README.md`'s "Hosting the frontend on
+Amplify" section). Point it at this stack's outputs (table above) via
+`frontend/.env.local`. Its `GET /tasks` client expects a bare JSON array back
+(`GetTasksFunction` returns `respond(200, tasks)`, not `{"tasks": [...]}`) — keep that contract
+in mind if either side changes.
 
 ### Tear down
 
@@ -325,68 +368,25 @@ sam delete --stack-name serverless-todo-app
 
 ## CI/CD Pipeline
 
-The pipeline in `.github/workflows/deploy.yml` runs on every push to `main`.
-
-### Stages
+`.github/workflows/deploy.yml` runs on every push/PR to `main` and is
+**lint + validate only**:
 
 ```
-push to main
+push or PR to main
   └── validate job
-        ├── flake8 lint (lambdas/)
-        ├── OIDC credentials
+        ├── flake8 lint (src/)
+        ├── OIDC credentials (read-only — no deploy permissions needed)
         └── sam validate --lint
-  └── deploy job (only on main push)
-        ├── OIDC credentials
-        ├── sam build --parallel --cached
-        ├── sam deploy --no-confirm-changeset
-        └── print stack outputs
 ```
 
-### One-time AWS OIDC setup
-
-**Step 1 — Create the GitHub OIDC Identity Provider**
-
-In AWS Console → IAM → Identity providers → Add provider:
-
-| Field | Value |
-|---|---|
-| Provider URL | `https://token.actions.githubusercontent.com` |
-| Audience | `sts.amazonaws.com` |
-
-**Step 2 — Create an IAM Role**
-
-Trust policy (replace `ACCOUNT_ID`):
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {
-        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-      },
-      "StringLike": {
-        "token.actions.githubusercontent.com:sub": "repo:nlenjibi/serverless-task-manager-system:*"
-      }
-    }
-  }]
-}
-```
-
-Attach `AdministratorAccess` (for the lab) or a scoped policy that covers: CloudFormation, Lambda, DynamoDB, Cognito, API Gateway, SNS, SQS, EventBridge Scheduler, IAM, S3.
-
-**Step 3 — Add GitHub secret**
-
-GitHub repo → Settings → Secrets → Actions → New secret:
-
-| Name | Value |
-|---|---|
-| `AWS_ROLE_ARN` | `arn:aws:iam::ACCOUNT_ID:role/GitHubActions-TodoApp` |
+Actual deployment is handled outside GitHub Actions entirely, via **AWS
+CodePipeline's Git Sync** integration connected directly to this repo (see
+the `aws-sync-main-*` remote branches CodePipeline manages) — pushes to
+`main` that pass validation are picked up and deployed by that pipeline, not
+by a GitHub Actions job. There is no `deploy` job to configure here — the
+`AWS_ROLE_ARN` secret the validate job assumes only needs enough permissions
+for `sam validate --lint` to introspect the account, not to create/update
+stack resources.
 
 ---
 
@@ -406,11 +406,22 @@ Lambda functions receive these through the SAM `Globals.Function.Environment` bl
 
 ## Observability
 
-All Lambda functions log structured output to **CloudWatch Logs**. Each function's log group is:
+All Lambda functions use **AWS Lambda Powertools** (`src/lib/observability.py`)
+for structured JSON logging and X-Ray tracing — both the Powertools layer and
+the `POWERTOOLS_SERVICE_NAME`/`LOG_LEVEL` env vars were already declared in
+`Globals.Function` but unused until every handler picked up the shared
+`logger`/`tracer`. `@logger.inject_lambda_context` adds the cold-start flag,
+request ID, and function metadata to every log line automatically; `@tracer.capture_lambda_handler`
+(paired with `Globals.Function.Tracing: Active`) sends traces to X-Ray. Each
+function's log group is:
 
 ```
 /aws/lambda/<stack-name>-<FunctionName>
 ```
+
+API Gateway access logs go to `/aws/apigateway/<stack-name>-access`
+(`ApiAccessLogGroup` in `template.yaml`), with per-method `LoggingLevel`/`MetricsEnabled`
+turned on via `MethodSettings`.
 
 ### Useful CloudWatch Insights queries
 
@@ -446,7 +457,7 @@ Add these to `template.yaml` to monitor production health:
 | Alarm | Metric | Threshold |
 |---|---|---|
 | Expiry failures | `TaskExpiryFunction` errors | > 0 in 5 min |
-| Cancellation DLQ depth | `CancellationQueue` `ApproximateNumberOfMessagesNotVisible` | > 10 |
+| Cancellation DLQ depth | `CancellationDLQ` `ApproximateNumberOfMessagesVisible` | > 0 |
 | API 5xx rate | API Gateway `5XXError` | > 1% over 5 min |
 
 ---
