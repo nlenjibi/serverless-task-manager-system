@@ -33,26 +33,6 @@ Parameters:
     Type: String
     Default: bem17
     Description: Used to tag all resources for cost allocation and ownership tracking
-  FrontendRepoUrl:
-    Type: String
-    Default: ""
-    Description: >
-      HTTPS URL of THIS repo (serverless-task-manager-system) — the frontend lives in its
-      frontend/ subfolder and Amplify builds it as a monorepo app root. Leave blank to skip
-      provisioning Amplify Hosting from this template (e.g. if you prefer to connect the repo
-      manually in the Amplify console).
-  FrontendRepoBranch:
-    Type: String
-    Default: main
-  GitHubAccessToken:
-    Type: String
-    Default: ""
-    NoEcho: true
-    Description: GitHub personal access token with repo scope, used by Amplify to pull this repo
-
-Conditions:
-  DeployAmplify: !Not [!Equals [!Ref FrontendRepoUrl, ""]]
-  IsProd: !Equals [!Ref Stage, prod]
 
 Resources:
 
@@ -519,66 +499,6 @@ Resources:
             FunctionResponseTypes:
               - ReportBatchItemFailures
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # AMPLIFY — FRONTEND HOSTING (only provisioned if FrontendRepoUrl is set)
-  # ─────────────────────────────────────────────────────────────────────────────
-
-  AmplifyApp:
-    Type: AWS::Amplify::App
-    Condition: DeployAmplify
-    Properties:
-      Name: !Sub "${AWS::StackName}-frontend"
-      Repository: !Ref FrontendRepoUrl
-      AccessToken: !Ref GitHubAccessToken
-      EnvironmentVariables:
-        - Name: NEXT_PUBLIC_USER_POOL_ID
-          Value: !Ref UserPool
-        - Name: NEXT_PUBLIC_USER_POOL_CLIENT_ID
-          Value: !Ref UserPoolClient
-        - Name: NEXT_PUBLIC_API_URL
-          Value: !Sub "https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
-        - Name: NEXT_PUBLIC_AWS_REGION
-          Value: !Ref AWS::Region
-      # Monorepo build spec: the Next.js app lives in frontend/, not the repo root,
-      # so Amplify needs an explicit `applications` app-root entry rather than
-      # auto-detecting a root-level amplify.yml.
-      BuildSpec: |
-        version: 1
-        applications:
-          - appRoot: frontend
-            frontend:
-              phases:
-                preBuild:
-                  commands:
-                    - npm ci
-                build:
-                  commands:
-                    - npm run build
-              artifacts:
-                baseDirectory: .next
-                files:
-                  - '**/*'
-              cache:
-                paths:
-                  - node_modules/**/*
-                  - .next/cache/**/*
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
-        - Key: ManagedBy
-          Value: SAM-GitHubActions
-
-  AmplifyBranch:
-    Type: AWS::Amplify::Branch
-    Condition: DeployAmplify
-    Properties:
-      AppId: !GetAtt AmplifyApp.AppId
-      BranchName: !Ref FrontendRepoBranch
-      EnableAutoBuild: true
-      Stage: !If [IsProd, PRODUCTION, DEVELOPMENT]
-
 # ─────────────────────────────────────────────────────────────────────────────
 # OUTPUTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -619,8 +539,3 @@ Outputs:
     Value: !Ref CancellationQueue
     Export:
       Name: !Sub "${AWS::StackName}-CancellationQueueUrl"
-
-  AmplifyDefaultDomain:
-    Description: Amplify Hosting URL for the frontend (only set when FrontendRepoUrl was provided)
-    Condition: DeployAmplify
-    Value: !Sub "https://${FrontendRepoBranch}.${AmplifyApp.DefaultDomain}"

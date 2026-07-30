@@ -1,15 +1,16 @@
 # Serverless Task Manager
 
-Event-driven task management app built with **AWS SAM**: Cognito auth, API
-Gateway + Lambda + DynamoDB for CRUD, and EventBridge Scheduler + DynamoDB
-Streams + SQS FIFO for expiry/cancellation. The `frontend/` folder is a
-Next.js app hosted on AWS Amplify as a monorepo build, optionally provisioned
-by this stack.
+Event-driven task management **backend** built with **AWS SAM**: Cognito
+auth, API Gateway + Lambda + DynamoDB for CRUD, and EventBridge Scheduler +
+DynamoDB Streams + SQS FIFO for expiry/cancellation. The frontend
+(`serverless-task-manager-frontend`, a Next.js app) lives in its own sibling
+repo and is not provisioned by this template — host it however you like
+(e.g. connect it to Amplify manually in the console).
 
 ## Architecture
 
 ```
-User → Amplify (Next.js app) → API Gateway (Cognito authorizer) → Lambda → DynamoDB
+User → Frontend (Next.js app) → API Gateway (Cognito authorizer) → Lambda → DynamoDB
                                                                        ↓
                                                      EventBridge Scheduler (per-task deadline)
                                                                        ↓
@@ -33,7 +34,6 @@ See `docs/architecture.md` for detailed Mermaid diagrams of each flow.
 | **EventBridge Scheduler** | Per-task one-time schedule fires at deadline |
 | **SNS** | Email notification to task owner on expiry |
 | **SQS FIFO + DLQ** | Decoupled cancellation queue (DynamoDB Streams → SQS → Lambda), poison messages routed to a dead-letter queue |
-| **Amplify Hosting** | Hosts `frontend/` as a monorepo build (optional — only provisioned when `FrontendRepoUrl` is set) |
 
 ## DynamoDB Schema
 
@@ -64,12 +64,13 @@ sam deploy            # subsequent deploys
 ```
 
 Copy the stack **Outputs** (`ApiUrl`, `UserPoolId`, `UserPoolClientId`) into
-`frontend/.env.local`.
+the frontend's `.env.local` (see the `serverless-task-manager-frontend` repo).
 
 ## Frontend
 
-`frontend/` is a Next.js 14 + TypeScript app (`aws-amplify` for Cognito auth,
-Axios for API calls), built as part of this same repo. It expects:
+The frontend lives in the sibling **`serverless-task-manager-frontend`**
+repo — a Next.js 14 + TypeScript app (`aws-amplify` for Cognito auth, Axios
+for API calls). It expects:
 
 | Env var | Value |
 |---|---|
@@ -78,47 +79,15 @@ Axios for API calls), built as part of this same repo. It expects:
 | `NEXT_PUBLIC_API_URL` | This stack's `ApiUrl` output |
 | `NEXT_PUBLIC_AWS_REGION` | The deploy region |
 
-```bash
-cd frontend
-cp .env.local.example .env.local   # fill in the values above
-npm install
-npm run dev                         # local dev server on :3000
-# or
-npm test                            # Jest unit tests
-npm run build                       # production build, same as Amplify runs
-```
-
-### Hosting the frontend on Amplify
-
-Two options:
-
-**A. Let this template provision Amplify Hosting** — create a GitHub personal
-access token with `repo` scope for *this* repo, then:
-
-```bash
-sam deploy --parameter-overrides \
-  Stage=dev \
-  FrontendRepoUrl=https://github.com/<you>/serverless-task-manager-system \
-  FrontendRepoBranch=main \
-  GitHubAccessToken=<token>
-```
-
-This creates `AWS::Amplify::App`/`Branch` with a monorepo `BuildSpec`
-(`appRoot: frontend`), wires the four `NEXT_PUBLIC_*` env vars from this
-stack's own outputs, and rebuilds on every push to that branch. The app URL
-is printed as the `AmplifyDefaultDomain` stack output.
-
-**B. Connect the repo manually in the Amplify console** — leave
-`FrontendRepoUrl` blank, connect this repo, enable "Monorepo" and set the app
-root to `frontend`, and paste the four `NEXT_PUBLIC_*` values into the
-Amplify app's environment variables yourself.
+See that repo's own README for local dev (`npm run dev`) and test
+(`npm test`) instructions, and its `amplify.yml` if you want to host it on
+AWS Amplify (connect it manually in the console — this template doesn't
+provision Amplify hosting).
 
 ## CI/CD
 
-`.github/workflows/deploy.yml` lints and validates on every push/PR to
-`main` (`flake8` over `src/`, `sam validate --lint`). Actual deployment to AWS
-is handled outside GitHub Actions, via AWS CodePipeline's Git Sync
-integration against this repo — see the `aws-sync-main-*` branches.
+`.github/workflows/pipeline.yaml` is the GitHub Actions pipeline (generated
+via `sam pipeline init`/`bootstrap`) that tests and deploys this stack.
 
 ## Lambda Functions
 

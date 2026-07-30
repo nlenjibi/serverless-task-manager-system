@@ -8,7 +8,7 @@
 
 ```mermaid
 graph TD
-    subgraph Client["🌐 Client — AWS Amplify Hosting (frontend/, Next.js, monorepo build)"]
+    subgraph Client["🌐 Client — serverless-task-manager-frontend (Next.js, separate repo)"]
         UI["Task Dashboard"]
     end
 

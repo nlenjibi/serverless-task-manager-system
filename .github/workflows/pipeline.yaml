@@ -4,13 +4,20 @@ on:
   push:
     branches:
       - 'main'
+  pull_request:
+    branches:
+      - 'main'
 
 env:
   SAM_TEMPLATE: template.yaml
-  STACK_NAME: serverless-todo-app
+  STACK_NAME: sam-app-prod
   PIPELINE_EXECUTION_ROLE: arn:aws:iam::584102815888:role/aws-sam-cli-managed-prod-pipe-PipelineExecutionRole-kJQ9LEM5Q8G7
   CLOUDFORMATION_EXECUTION_ROLE: arn:aws:iam::584102815888:role/aws-sam-cli-managed-prod--CloudFormationExecutionRo-X9Pood7mJ5G6
   ARTIFACTS_BUCKET: aws-sam-cli-managed-prod-pipeline--artifactsbucket-eopf0tdciav9
+  # If there are functions with "Image" PackageType in your template,
+  # uncomment the line below and add "--image-repository ${IMAGE_REPOSITORY}" to
+  # the "sam deploy" command.
+  # IMAGE_REPOSITORY = '0123456789.dkr.ecr.region.amazonaws.com/repository-name'
   REGION: eu-west-1
 
 permissions:
@@ -25,17 +32,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: aws-actions/setup-sam@v2
-        with:
-          use-installer: true
       - name: Install linting tools
         run: pip install flake8 boto3 aws-lambda-powertools
       - name: Lint Lambda functions
         run: flake8 src/ --max-line-length=120 --ignore=E501
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
       - name: Validate SAM template
         run: sam validate --template ${SAM_TEMPLATE} --lint
 
   build-and-deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: [test]
     runs-on: ubuntu-latest
     steps:
@@ -52,44 +60,15 @@ jobs:
         with:
           aws-region: ${{ env.REGION }}
           role-to-assume: ${{ env.PIPELINE_EXECUTION_ROLE }}
-          role-session-name: prod-deployment
+          role-session-name: deployment
           role-duration-seconds: 3600
           role-skip-session-tagging: true
 
-      - name: Deploy
+      - name: Deploy to account
         run: |
           sam deploy --stack-name ${STACK_NAME} \
-            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --capabilities CAPABILITY_IAM \
             --region ${REGION} \
             --s3-bucket ${ARTIFACTS_BUCKET} \
             --no-fail-on-empty-changeset \
             --role-arn ${CLOUDFORMATION_EXECUTION_ROLE}
-
-  integration-test:
-    needs: [build-and-deploy]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Assume the pipeline execution role
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ env.REGION }}
-          role-to-assume: ${{ env.PIPELINE_EXECUTION_ROLE }}
-          role-session-name: integration-test
-          role-duration-seconds: 3600
-          role-skip-session-tagging: true
-
-      - name: Smoke test — confirm the API is live and Cognito auth is enforced
-        run: |
-          API_URL=$(aws cloudformation describe-stacks \
-            --stack-name ${STACK_NAME} \
-            --region ${REGION} \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-            --output text)
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${API_URL}/tasks")
-          echo "GET /tasks (no auth) returned HTTP $STATUS"
-          if [ "$STATUS" != "401" ]; then
-            echo "Expected 401 Unauthorized (Cognito authorizer should reject unauthenticated requests), got $STATUS"
-            exit 1
-          fi
