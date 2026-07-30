@@ -217,8 +217,39 @@ Resources:
       LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}-access"
       RetentionInDays: 14
 
+  # API Gateway can only push logs/metrics to CloudWatch once the account has
+  # a CloudWatch Logs role configured (an account-wide, one-time setting).
+  # Without this, any stage using MethodSettings/AccessLogSetting fails to
+  # create with "CloudWatch Logs role ARN must be set in account settings".
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-ApiGatewayCloudWatchRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: SAM-GitHubActions
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
   TodoApi:
     Type: AWS::Serverless::Api
+    DependsOn: ApiGatewayAccount
     Properties:
       Name: !Sub "${AWS::StackName}-API"
       StageName: !Ref Stage
